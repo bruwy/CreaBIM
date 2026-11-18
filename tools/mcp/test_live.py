@@ -40,7 +40,8 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
                         names = {'inspect_project', 'list_elements', 'get_element',
                                  'get_schema', 'check_spec', 'build_project'}
-                        self.assertEqual(set(tools), names | ({'live_inspect', 'live_create_wall'} if enabled else set()))
+                        live_names = {'live_inspect', 'live_create_wall', 'live_create_door', 'live_update_door'}
+                        self.assertEqual(set(tools), names | (live_names if enabled else set()))
                         if not enabled:
                             continue
                         schema = tools['live_create_wall'].inputSchema
@@ -61,6 +62,16 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                             'start': [0, 0], 'end': [3, 0], 'wall_type_id': 'type', 'thickness': 0.2})
                         self.assertTrue(conflict.isError, conflict)
                         self.assertEqual(len(requests), 2)
+                        door = await client.call_tool('live_create_door', {
+                            'document_id': 'doc', 'expected_revision': 7, 'wall_id': 'host', 'center': 2.0})
+                        self.assertFalse(door.isError, door)
+                        self.assertEqual(requests[-1]['command'], 'create_door')
+                        self.assertEqual(requests[-1]['args'], {'wall_id': 'host', 'center': 2.0})
+                        edit = await client.call_tool('live_update_door', {
+                            'document_id': 'doc', 'expected_revision': 7, 'element_id': 'door', 'width': 1.1})
+                        self.assertFalse(edit.isError, edit)
+                        self.assertEqual(requests[-1]['command'], 'update_door')
+                        self.assertEqual(requests[-1]['args'], {'element_id': 'door', 'width': 1.1})
         finally:
             server.close()
             await server.wait_closed()

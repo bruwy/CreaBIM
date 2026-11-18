@@ -55,6 +55,8 @@ Start your MCP host from the same shell so its server inherits both environment 
 
 - `live_inspect()`: get the open document ID, revision, project path, levels and wall types. Use these IDs and the current revision for the next edit.
 - `live_create_wall(document_id, expected_revision, level_id, start, end, wall_type_id, thickness, location)`: create a straight wall in the open document. Positions and thickness are in metres. Choose a wall type to use its defaults, or omit it and optionally specify thickness and location; a type cannot be combined with those overrides. Untyped walls default to 0.20 m thickness and Centre location, with the height of the level.
+- `live_create_door(document_id, expected_revision, wall_id, center, opening_type_id, width, height)`: place a hosted door. Measure `center` along the wall from its start in metres. Supply a door type or use the native 0.90 × 2.10 m defaults with optional size overrides.
+- `live_update_door(document_id, expected_revision, element_id, offset, width, height)`: edit dimensions or slide a door on its host. Offset is the distance from the wall start to the near jamb. Find existing IDs with `list_elements` on a saved copy of the open document.
 
 For an untyped wall, use `Centre`, `ExteriorFace`, `InteriorFace`, `CoreCentre`, `CoreExterior` or `CoreInterior` as the location. The two input points lie along that line.
 

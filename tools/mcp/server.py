@@ -158,6 +158,29 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
                                        'location': location}.items() if v is not None})
         return live_call('create_wall', args, document_id, expected_revision)
 
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_create_door(document_id: str, expected_revision: int, wall_id: str,
+                         center: float, opening_type_id: str | None = None,
+                         width: float | None = None, height: float | None = None) -> dict[str, Any]:
+        """Place a door in a host wall. The centre is measured from the wall start in metres.
+
+        An opening type sets the dimensions. Use width and height only for untyped doors.
+        """
+        args = {'wall_id': wall_id, 'center': center}
+        args.update({k: v for k, v in {'opening_type_id': opening_type_id, 'width': width,
+                                       'height': height}.items() if v is not None})
+        return live_call('create_door', args, document_id, expected_revision)
+
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_update_door(document_id: str, expected_revision: int, element_id: str,
+                         offset: float | None = None, width: float | None = None,
+                         height: float | None = None) -> dict[str, Any]:
+        """Edit a door in place. Offset is from the wall start to the nearer jamb in metres."""
+        args = {'element_id': element_id}
+        args.update({k: v for k, v in {'offset': offset, 'width': width, 'height': height}.items()
+                     if v is not None})
+        return live_call('update_door', args, document_id, expected_revision)
+
 
 if __name__ == '__main__':
     mcp.run(transport='stdio')

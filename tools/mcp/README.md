@@ -55,6 +55,8 @@ Start your MCP host from the same shell so its server inherits both environment 
 
 - `live_inspect()`: get the open document ID, revision, project path, levels and wall types. Use these IDs and the current revision for the next edit.
 - `live_create_wall(document_id, expected_revision, level_id, start, end, wall_type_id, thickness, location)`: create a straight wall in the open document. Positions and thickness are in metres. Choose a wall type to use its defaults, or omit it and optionally specify thickness and location; a type cannot be combined with those overrides. Untyped walls default to 0.20 m thickness and Centre location, with the height of the level.
+- `live_create_railing(document_id, expected_revision, level_id, path)`: create a free-standing railing along an XY polyline on a level. Dimensions are in metres; height and other settings use native defaults.
+- `live_update_railing(document_id, expected_revision, element_id, height)`: edit a railing's height in metres using its existing path or stair host.
 
 For an untyped wall, use `Centre`, `ExteriorFace`, `InteriorFace`, `CoreCentre`, `CoreExterior` or `CoreInterior` as the location. The two input points lie along that line.
 

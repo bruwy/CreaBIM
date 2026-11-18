@@ -158,6 +158,20 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
                                        'location': location}.items() if v is not None})
         return live_call('create_wall', args, document_id, expected_revision)
 
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_create_railing(document_id: str, expected_revision: int, level_id: str,
+                            path: list[list[float]]) -> dict[str, Any]:
+        """Create a free-standing railing along an XY path on a level. Units are metres."""
+        return live_call('create_railing', {'level_id': level_id, 'path': path},
+                         document_id, expected_revision)
+
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_update_railing(document_id: str, expected_revision: int, element_id: str,
+                            height: float) -> dict[str, Any]:
+        """Edit a railing's height in metres. Its path or stair host stays put."""
+        return live_call('update_railing', {'element_id': element_id, 'height': height},
+                         document_id, expected_revision)
+
 
 if __name__ == '__main__':
     mcp.run(transport='stdio')

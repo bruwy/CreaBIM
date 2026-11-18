@@ -40,9 +40,13 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
                         names = {'inspect_project', 'list_elements', 'get_element',
                                  'get_schema', 'check_spec', 'build_project'}
-                        self.assertEqual(set(tools), names | ({'live_inspect', 'live_create_wall'} if enabled else set()))
+                        live = {'live_inspect', 'live_create_wall', 'live_create_railing', 'live_update_railing'}
+                        self.assertEqual(set(tools), names | (live if enabled else set()))
                         if not enabled:
                             continue
+                        self.assertNotIn('height', tools['live_create_railing'].inputSchema['properties'])
+                        self.assertIn('height', tools['live_update_railing'].inputSchema['required'])
+                        self.assertNotIn('post_spacing', tools['live_update_railing'].inputSchema['properties'])
                         schema = tools['live_create_wall'].inputSchema
                         self.assertEqual(schema['properties']['start']['items']['type'], 'number')
                         inspect = await client.call_tool('live_inspect', {})
@@ -61,6 +65,18 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                             'start': [0, 0], 'end': [3, 0], 'wall_type_id': 'type', 'thickness': 0.2})
                         self.assertTrue(conflict.isError, conflict)
                         self.assertEqual(len(requests), 2)
+                        railing = await client.call_tool('live_create_railing', {
+                            'document_id': 'doc', 'expected_revision': 7, 'level_id': 'level',
+                            'path': [[0, 0], [4, 0], [4, 3]]})
+                        self.assertFalse(railing.isError, railing)
+                        self.assertEqual(requests[-1]['command'], 'create_railing')
+                        edit = await client.call_tool('live_update_railing', {
+                            'document_id': 'doc', 'expected_revision': 7, 'element_id': 'rail',
+                            'height': 1.1})
+                        self.assertFalse(edit.isError, edit)
+                        self.assertEqual(requests[-1]['command'], 'update_railing')
+                        self.assertEqual(requests[-1]['args'], {
+                            'element_id': 'rail', 'height': 1.1})
         finally:
             server.close()
             await server.wait_closed()

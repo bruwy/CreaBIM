@@ -1,5 +1,6 @@
 use super::CreaBimApp;
 use crate::planview::{self, PlanState};
+use crate::{memberstool, planview::Tool, selection::Selection};
 use creabim_core::{ElementId, ElementKind, LocationLine, TypeCategory};
 use eframe::egui;
 use glam::DVec2;
@@ -15,6 +16,20 @@ struct WallRequest {
     wall_type_id: Option<ElementId>,
     thickness: Option<f64>,
     location: Option<LocationLine>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RailingRequest {
+    level_id: ElementId,
+    path: Vec<[f64; 2]>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RailingEdit {
+    element_id: ElementId,
+    height: f64,
 }
 
 impl CreaBimApp {
@@ -33,7 +48,7 @@ impl CreaBimApp {
                 || !self.shell.keys.is_empty()
                 || self.shell.web.as_ref().is_some_and(|web| web.has_pending())
         };
-        let result = if request.command == "create_wall" && interacting() {
+        let result = if request.command != "inspect_document" && interacting() {
             Err("Finish the current interaction in CreaBIM before editing".into())
         } else {
             self.live_command(
@@ -80,7 +95,7 @@ impl CreaBimApp {
                 "project_path": self.path, "levels": levels, "wall_types": wall_types}),
             );
         }
-        if command != "create_wall" {
+        if !matches!(command, "create_wall" | "create_railing" | "update_railing") {
             return Err("Unknown live MCP command".into());
         }
         if document_id != Some(self.live_document_id.as_str()) {
@@ -111,6 +126,20 @@ impl CreaBimApp {
             return Err("Finish the current operation in CreaBIM before editing".into());
         }
 
+        let id = match command {
+            "create_railing" => self.live_railing_create(args)?,
+            "update_railing" => self.live_railing_update(args)?,
+            _ => self.live_wall_create(args)?,
+        };
+        let model = self.doc.model();
+        Ok(
+            json!({"id": id, "element": model.get(id), "document_id": self.live_document_id,
+            "revision": model.revision()}),
+        )
+    }
+
+    fn live_wall_create(&mut self, args: Value) -> Result<ElementId, String> {
+        let model = self.doc.model();
         let wall: WallRequest = serde_json::from_value(args).map_err(|e| e.to_string())?;
         if model.level(wall.level_id).is_none() {
             return Err("Choose a level from live_inspect".into());
@@ -148,13 +177,68 @@ impl CreaBimApp {
                 return Err("An untyped wall has no layer boundaries".into());
             }
         }
-        let id = planview::create_straight_wall(&mut self.doc, wall.level_id, &state, start, end)
-            .map_err(|e| e.to_string())?;
-        let model = self.doc.model();
-        Ok(
-            json!({"id": id, "element": model.get(id), "document_id": self.live_document_id,
-            "revision": model.revision()}),
+        planview::create_straight_wall(&mut self.doc, wall.level_id, &state, start, end)
+            .map_err(|e| e.to_string())
+    }
+
+    fn live_railing_create(&mut self, args: Value) -> Result<ElementId, String> {
+        let railing: RailingRequest = serde_json::from_value(args).map_err(|e| e.to_string())?;
+        if self.doc.model().level(railing.level_id).is_none() {
+            return Err("Choose a level from live_inspect".into());
+        }
+        let path: Vec<_> = railing.path.into_iter().map(DVec2::from_array).collect();
+        if path.len() < 2 || path.iter().any(|p| !(p.abs().max_element() <= 1e9)) {
+            return Err("Provide at least two railing points within ±1e9 m".into());
+        }
+        let mut length = 0.0;
+        for pair in path.windows(2) {
+            let span = pair[0].distance(pair[1]);
+            if span < 0.05 {
+                return Err("Successive railing points must be at least 0.05 m apart".into());
+            }
+            length += span;
+        }
+        // Posts are allocated for the whole path when the scene rebuilds.
+        if length / 1.2 + path.len() as f64 > 10_000.0 {
+            return Err("The railing path would create too many posts".into());
+        }
+        let mut state = PlanState::default();
+        let last = *path.last().unwrap();
+        state.members.path = path;
+        let mut selection = Selection::default();
+        memberstool::click(
+            &mut self.doc,
+            railing.level_id,
+            Tool::Railing,
+            last,
+            &mut state,
+            &mut selection,
         )
+        .map_err(|e| e.to_string())?;
+        selection
+            .active
+            .ok_or_else(|| "Railing was not created".into())
+    }
+
+    fn live_railing_update(&mut self, args: Value) -> Result<ElementId, String> {
+        let edit: RailingEdit = serde_json::from_value(args).map_err(|e| e.to_string())?;
+        if !matches!(
+            self.doc.model().get(edit.element_id).map(|e| &e.kind),
+            Some(ElementKind::Railing(_))
+        ) {
+            return Err("Choose a railing element to update".into());
+        }
+        if !(0.2..=3.0).contains(&edit.height) {
+            return Err("Railing height must be between 0.2 and 3.0 m".into());
+        }
+        self.doc
+            .edit(edit.element_id, "Edit railing", |element| {
+                if let ElementKind::Railing(railing) = &mut element.kind {
+                    railing.height = edit.height;
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(edit.element_id)
     }
 }
 
@@ -163,6 +247,59 @@ mod tests {
     use super::*;
     use crate::{planview::Tool, selection::Selection};
     use creabim_core::Element;
+
+    #[test]
+    fn live_railing_keeps_native_defaults_path_and_undo() {
+        let mut app = CreaBimApp::blank(None);
+        app.load_model(creabim_core::sample::typed_house());
+        let snapshot = app
+            .live_command("inspect_document", json!({}), None, None)
+            .unwrap();
+        let doc_id = snapshot["document_id"].as_str();
+        let level: ElementId = serde_json::from_value(snapshot["levels"][0]["id"].clone()).unwrap();
+        let before_create = app.doc.model().clone();
+        let created = app
+            .live_command(
+                "create_railing",
+                json!({
+                    "level_id": level, "path": [[40.0, 40.0], [44.0, 40.0], [44.0, 43.0]]
+                }),
+                doc_id,
+                snapshot["revision"].as_u64(),
+            )
+            .unwrap();
+        let id: ElementId = serde_json::from_value(created["id"].clone()).unwrap();
+        let ElementKind::Railing(railing) = &app.doc.model().get(id).unwrap().kind else {
+            panic!("not a railing")
+        };
+        assert_eq!(
+            railing.path,
+            vec![
+                glam::DVec3::new(40.0, 40.0, 0.0),
+                glam::DVec3::new(44.0, 40.0, 0.0),
+                glam::DVec3::new(44.0, 43.0, 0.0)
+            ]
+        );
+        assert_eq!(
+            (railing.height, railing.post_spacing, railing.stair),
+            (1.0, 1.2, None)
+        );
+        let before_edit = app.doc.model().clone();
+        let edited = app
+            .live_command(
+                "update_railing",
+                json!({"element_id": id, "height": 1.2}),
+                doc_id,
+                created["revision"].as_u64(),
+            )
+            .unwrap();
+        assert_eq!(edited["id"], created["id"]);
+        assert_eq!(edited["element"]["kind"]["Railing"]["height"], 1.2);
+        assert!(app.doc.undo());
+        assert_eq!(&before_edit, app.doc.model());
+        assert!(app.doc.undo());
+        assert_eq!(&before_create, app.doc.model());
+    }
 
     #[test]
     fn live_wall_matches_native_wall_and_undo() {

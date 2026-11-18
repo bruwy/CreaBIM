@@ -62,20 +62,20 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                             'start': [0, 0], 'end': [3, 0], 'wall_type_id': 'type', 'thickness': 0.2})
                         self.assertTrue(conflict.isError, conflict)
                         self.assertEqual(len(requests), 2)
-                        door = await client.call_tool('live_create_door', {
-                            'document_id': 'doc', 'expected_revision': 7, 'wall_id': 'host', 'center': 2.0})
-                        self.assertFalse(door.isError, door)
-                        self.assertEqual(requests[-1]['command'], 'create_door')
-                        self.assertEqual(requests[-1]['args'], {'wall_id': 'host', 'center': 2.0})
-                        edit = await client.call_tool('live_update_door', {
-                            'document_id': 'doc', 'expected_revision': 7, 'element_id': 'door', 'width': 1.1,
-                            'material_id': 'material', 'frame_width': 0.08, 'frame_depth': 0.15,
-                            'flip_hand': False, 'flip_facing': True})
-                        self.assertFalse(edit.isError, edit)
-                        self.assertEqual(requests[-1]['command'], 'update_door')
-                        self.assertEqual(requests[-1]['args'], {
-                            'element_id': 'door', 'width': 1.1, 'material_id': 'material',
-                            'frame_width': 0.08, 'frame_depth': 0.15, 'flip_hand': False, 'flip_facing': True})
+                        create_schema = tools['live_create_door'].inputSchema
+                        self.assertIn('opening_type_id', create_schema['required'])
+                        self.assertNotIn('width', create_schema['properties'])
+                        edit_schema = tools['live_update_door'].inputSchema
+                        self.assertTrue({'width', 'height', 'offset'}.isdisjoint(edit_schema['properties']))
+                        for command, args in (
+                            ('create_door', {'wall_id': 'host', 'center': 2.0, 'opening_type_id': 'door_type'}),
+                            ('update_door', {'element_id': 'door', 'material_id': 'material', 'frame_width': 0.08,
+                                             'frame_depth': 0.15, 'flip_hand': False, 'flip_facing': True}),
+                        ):
+                            result = await client.call_tool(f'live_{command}', {
+                                'document_id': 'doc', 'expected_revision': 7, **args})
+                            self.assertFalse(result.isError, result)
+                            self.assertEqual((requests[-1]['command'], requests[-1]['args']), (command, args))
         finally:
             server.close()
             await server.wait_closed()

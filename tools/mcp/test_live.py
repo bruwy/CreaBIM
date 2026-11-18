@@ -40,7 +40,8 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
                         names = {'inspect_project', 'list_elements', 'get_element',
                                  'get_schema', 'check_spec', 'build_project'}
-                        self.assertEqual(set(tools), names | ({'live_inspect', 'live_create_wall'} if enabled else set()))
+                        live = {'live_inspect', 'live_create_wall', 'live_create_stair', 'live_update_stair'}
+                        self.assertEqual(set(tools), names | (live if enabled else set()))
                         if not enabled:
                             continue
                         schema = tools['live_create_wall'].inputSchema
@@ -61,6 +62,18 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                             'start': [0, 0], 'end': [3, 0], 'wall_type_id': 'type', 'thickness': 0.2})
                         self.assertTrue(conflict.isError, conflict)
                         self.assertEqual(len(requests), 2)
+                        self.assertNotIn('width', tools['live_create_stair'].inputSchema['properties'])
+                        self.assertIn('width', tools['live_update_stair'].inputSchema['required'])
+                        for command, args in (
+                            ('create_stair', {'level_id': 'level', 'start': [0, 0], 'toward': [1, 0]}),
+                            ('update_stair', {'element_id': 'stair', 'width': 1.4}),
+                        ):
+                            reply = await client.call_tool(f'live_{command}', {
+                                'document_id': 'doc', 'expected_revision': 7, **args})
+                            self.assertFalse(reply.isError, reply)
+                            self.assertEqual(requests[-1], {
+                                'token': TOKEN, 'command': command, 'document_id': 'doc',
+                                'expected_revision': 7, 'args': args})
         finally:
             server.close()
             await server.wait_closed()

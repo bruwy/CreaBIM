@@ -1,5 +1,7 @@
 use super::CreaBimApp;
-use crate::planview::{self, PlanState};
+use crate::memberstool;
+use crate::planview::{self, PlanState, Tool};
+use crate::selection::Selection;
 use creabim_core::{ElementId, ElementKind, LocationLine, TypeCategory};
 use eframe::egui;
 use glam::DVec2;
@@ -15,6 +17,21 @@ struct WallRequest {
     wall_type_id: Option<ElementId>,
     thickness: Option<f64>,
     location: Option<LocationLine>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StairRequest {
+    level_id: ElementId,
+    start: [f64; 2],
+    toward: [f64; 2],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StairEdit {
+    element_id: ElementId,
+    width: f64,
 }
 
 impl CreaBimApp {
@@ -33,7 +50,7 @@ impl CreaBimApp {
                 || !self.shell.keys.is_empty()
                 || self.shell.web.as_ref().is_some_and(|web| web.has_pending())
         };
-        let result = if request.command == "create_wall" && interacting() {
+        let result = if request.command != "inspect_document" && interacting() {
             Err("Finish the current interaction in CreaBIM before editing".into())
         } else {
             self.live_command(
@@ -80,9 +97,12 @@ impl CreaBimApp {
                 "project_path": self.path, "levels": levels, "wall_types": wall_types}),
             );
         }
-        if command != "create_wall" {
-            return Err("Unknown live MCP command".into());
-        }
+        let apply: fn(&mut Self, Value) -> Result<ElementId, String> = match command {
+            "create_wall" => Self::live_create_wall,
+            "create_stair" => Self::live_create_stair,
+            "update_stair" => Self::live_update_stair,
+            _ => return Err("Unknown live MCP command".into()),
+        };
         if document_id != Some(self.live_document_id.as_str()) {
             return Err("The active document changed; inspect it before editing".into());
         }
@@ -111,6 +131,16 @@ impl CreaBimApp {
             return Err("Finish the current operation in CreaBIM before editing".into());
         }
 
+        let id = apply(self, args)?;
+        let model = self.doc.model();
+        Ok(
+            json!({"id": id, "element": model.get(id), "document_id": self.live_document_id,
+            "revision": model.revision()}),
+        )
+    }
+
+    fn live_create_wall(&mut self, args: Value) -> Result<ElementId, String> {
+        let model = self.doc.model();
         let wall: WallRequest = serde_json::from_value(args).map_err(|e| e.to_string())?;
         if model.level(wall.level_id).is_none() {
             return Err("Choose a level from live_inspect".into());
@@ -148,21 +178,131 @@ impl CreaBimApp {
                 return Err("An untyped wall has no layer boundaries".into());
             }
         }
-        let id = planview::create_straight_wall(&mut self.doc, wall.level_id, &state, start, end)
-            .map_err(|e| e.to_string())?;
+        planview::create_straight_wall(&mut self.doc, wall.level_id, &state, start, end)
+            .map_err(|e| e.to_string())
+    }
+
+    fn live_create_stair(&mut self, args: Value) -> Result<ElementId, String> {
+        let request: StairRequest = serde_json::from_value(args).map_err(|e| e.to_string())?;
         let model = self.doc.model();
-        Ok(
-            json!({"id": id, "element": model.get(id), "document_id": self.live_document_id,
-            "revision": model.revision()}),
+        if model.level(request.level_id).is_none() {
+            return Err("Choose a level from live_inspect".into());
+        }
+        let start = DVec2::from_array(request.start);
+        let toward = DVec2::from_array(request.toward);
+        if !request
+            .start
+            .into_iter()
+            .chain(request.toward)
+            .all(|v| v.abs() <= 1e9)
+            || start.distance(toward) <= 0.05
+        {
+            return Err(
+                "Stair points must be finite and within ±1e9 m, and more than 0.05 m apart".into(),
+            );
+        }
+        let mut state = PlanState::default();
+        state.pending = Some(start);
+        let mut selection = Selection::default();
+        memberstool::click(
+            &mut self.doc,
+            request.level_id,
+            Tool::Stair,
+            toward,
+            &mut state,
+            &mut selection,
         )
+        .map_err(|e| e.to_string())?;
+        selection
+            .active
+            .ok_or_else(|| "The Stair tool did not place a stair".into())
+    }
+
+    fn live_update_stair(&mut self, args: Value) -> Result<ElementId, String> {
+        let request: StairEdit = serde_json::from_value(args).map_err(|e| e.to_string())?;
+        if !matches!(
+            self.doc.model().get(request.element_id).map(|e| &e.kind),
+            Some(ElementKind::Stair(stair)) if stair.landing.is_none()
+        ) {
+            return Err("Choose a straight stair without landings".into());
+        }
+        if !(0.5..=5.0).contains(&request.width) {
+            return Err("Stair width must be between 0.5 and 5 m".into());
+        }
+        self.doc
+            .edit(request.element_id, "Stair width", |element| {
+                if let ElementKind::Stair(stair) = &mut element.kind {
+                    stair.width = request.width;
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(request.element_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{planview::Tool, selection::Selection};
     use creabim_core::Element;
+
+    #[test]
+    fn live_stair_matches_native_and_updates_in_place() {
+        let mut app = CreaBimApp::blank(None);
+        app.load_model(creabim_core::sample::typed_house());
+        let level = app.doc.model().levels().next().unwrap().0.id;
+        let document = app.live_document_id.clone();
+        let document_id = Some(document.as_str());
+        let start = DVec2::new(40.0, 40.0);
+        let toward = DVec2::new(44.0, 44.0);
+        let native =
+            memberstool::new_stair(app.doc.model(), level, start, toward, &Default::default());
+
+        let before = app.doc.model().revision();
+        let create = json!({
+            "level_id": level, "start": start.to_array(), "toward": toward.to_array(),
+        });
+        let mut invalid = create.clone();
+        invalid["width"] = json!(1.2);
+        assert!(app
+            .live_command("create_stair", invalid, document_id, Some(before))
+            .is_err());
+        let reply = app
+            .live_command("create_stair", create, document_id, Some(before))
+            .unwrap();
+        let created: Element = serde_json::from_value(reply["element"].clone()).unwrap();
+        assert_eq!(created.kind, ElementKind::Stair(native));
+        assert_eq!(app.doc.undo_label(), Some("Draw stair"));
+
+        let revision = app.doc.model().revision();
+        assert!(app
+            .live_command(
+                "update_stair",
+                json!({"element_id": created.id, "width": 0.0}),
+                document_id,
+                Some(revision)
+            )
+            .is_err());
+        assert_eq!(app.doc.model().revision(), revision);
+        let reply = app
+            .live_command(
+                "update_stair",
+                json!({"element_id": created.id, "width": 1.4}),
+                document_id,
+                Some(revision),
+            )
+            .unwrap();
+        let updated: Element = serde_json::from_value(reply["element"].clone()).unwrap();
+        let mut expected = created.clone();
+        let ElementKind::Stair(stair) = &mut expected.kind else {
+            unreachable!()
+        };
+        stair.width = 1.4;
+        assert_eq!(updated, expected);
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.model().get(created.id), Some(&created));
+        assert!(app.doc.undo());
+        assert!(app.doc.model().get(created.id).is_none());
+    }
 
     #[test]
     fn live_wall_matches_native_wall_and_undo() {

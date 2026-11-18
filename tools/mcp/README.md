@@ -55,6 +55,8 @@ Start your MCP host from the same shell so its server inherits both environment 
 
 - `live_inspect()`: get the open document ID, revision, project path, levels and wall types. Use these IDs and the current revision for the next edit.
 - `live_create_wall(document_id, expected_revision, level_id, start, end, wall_type_id, thickness, location)`: create a straight wall in the open document. Positions and thickness are in metres. Choose a wall type to use its defaults, or omit it and optionally specify thickness and location; a type cannot be combined with those overrides. Untyped walls default to 0.20 m thickness and Centre location, with the height of the level.
+- `live_create_stair(document_id, expected_revision, level_id, start, toward)`: create a straight stair with the Stair tool's defaults. The second XY point sets its climbing direction. The rise comes from the next level or, on the top level, the current level's height.
+- `live_update_stair(document_id, expected_revision, element_id, width)`: set a straight stair's width from 0.5 to 5 m in one undo step.
 
 For an untyped wall, use `Centre`, `ExteriorFace`, `InteriorFace`, `CoreCentre`, `CoreExterior` or `CoreInterior` as the location. The two input points lie along that line.
 

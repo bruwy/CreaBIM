@@ -158,6 +158,24 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
                                        'location': location}.items() if v is not None})
         return live_call('create_wall', args, document_id, expected_revision)
 
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_create_stair(document_id: str, expected_revision: int, level_id: str,
+                          start: list[float], toward: list[float]) -> dict[str, Any]:
+        """Create a straight stair with the native defaults. XY points are in metres.
+
+        The second point sets the direction of travel. The stair rises to the
+        next level, or by the current level's height if it is the top level.
+        """
+        return live_call('create_stair', {'level_id': level_id, 'start': start, 'toward': toward},
+                         document_id, expected_revision)
+
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_update_stair(document_id: str, expected_revision: int, element_id: str,
+                          width: float) -> dict[str, Any]:
+        """Set the width of a straight stair in metres."""
+        return live_call('update_stair', {'element_id': element_id, 'width': width},
+                         document_id, expected_revision)
+
 
 if __name__ == '__main__':
     mcp.run(transport='stdio')

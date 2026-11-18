@@ -138,7 +138,7 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
 
     @mcp.tool(annotations=READ_ONLY, structured_output=True)
     def live_inspect() -> dict[str, Any]:
-        """Inspect the open document, revision, project path, levels and wall types."""
+        """Inspect the open document, revision, project path, levels and wall and door types."""
         return live_call('inspect_document', {})
 
     @mcp.tool(annotations=CREATE, structured_output=True)
@@ -160,33 +160,25 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
 
     @mcp.tool(annotations=CREATE, structured_output=True)
     def live_create_door(document_id: str, expected_revision: int, wall_id: str,
-                         center: float, opening_type_id: str | None = None,
-                         width: float | None = None, height: float | None = None) -> dict[str, Any]:
-        """Place a door in a host wall. The centre is measured from the wall start in metres.
-
-        An opening type sets the dimensions. Use width and height only for untyped doors.
-        """
-        args = {'wall_id': wall_id, 'center': center}
-        args.update({k: v for k, v in {'opening_type_id': opening_type_id, 'width': width,
-                                       'height': height}.items() if v is not None})
+                         center: float, opening_type_id: str) -> dict[str, Any]:
+        """Place a typed door. Measure the centre from the wall start in metres."""
+        args = {'wall_id': wall_id, 'center': center, 'opening_type_id': opening_type_id}
         return live_call('create_door', args, document_id, expected_revision)
 
     @mcp.tool(annotations=CREATE, structured_output=True)
     def live_update_door(document_id: str, expected_revision: int, element_id: str,
-                         offset: float | None = None, width: float | None = None,
-                         height: float | None = None, material_id: str | None = None,
+                         material_id: str | None = None,
                          clear_material: bool = False, frame_width: float | None = None,
                          frame_depth: float | None = None, flip_hand: bool | None = None,
                          flip_facing: bool | None = None) -> dict[str, Any]:
-        """Edit a door's dimensions, material, frame, hinge and swing in place.
+        """Edit a door's material, frame, hinge and swing in place.
 
-        Dimensions are in metres. Measure offset from the wall start to the near jamb.
+        Frame dimensions are in metres.
         Set flip_hand to hinge at the end jamb and flip_facing to swing to the exterior.
         Both are states. Use clear_material to remove the assigned material.
         """
         args = {'element_id': element_id}
-        args.update({k: v for k, v in {'offset': offset, 'width': width, 'height': height,
-                                       'material_id': material_id, 'frame_width': frame_width,
+        args.update({k: v for k, v in {'material_id': material_id, 'frame_width': frame_width,
                                        'frame_depth': frame_depth, 'flip_hand': flip_hand,
                                        'flip_facing': flip_facing}.items() if v is not None})
         if clear_material:
@@ -195,40 +187,27 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
 
     @mcp.tool(annotations=CREATE, structured_output=True)
     def live_create_window(document_id: str, expected_revision: int, wall_id: str,
-                           center: float, opening_type_id: str | None = None, width: float | None = None,
-                           height: float | None = None, sill: float | None = None) -> dict[str, Any]:
-        """Place a window in a host wall. The centre is measured from the wall start in metres.
-
-        An opening type sets the dimensions and sill. Override them only for untyped windows.
-        """
-        args = {'wall_id': wall_id, 'center': center}
-        args.update({k: v for k, v in {'opening_type_id': opening_type_id, 'width': width,
-                                       'height': height, 'sill': sill}.items() if v is not None})
+                           center: float, opening_type_id: str) -> dict[str, Any]:
+        """Place a typed window. Measure the centre along the wall in metres."""
+        args = {'wall_id': wall_id, 'center': center, 'opening_type_id': opening_type_id}
         return live_call('create_window', args, document_id, expected_revision)
 
     @mcp.tool(annotations=CREATE, structured_output=True)
     def live_update_window(document_id: str, expected_revision: int, element_id: str,
-                           offset: float | None = None, width: float | None = None,
-                           height: float | None = None, sill: float | None = None,
                            material_id: str | None = None, clear_material: bool = False,
                            frame_width: float | None = None, frame_depth: float | None = None,
                            panes_across: int | None = None, panes_up: int | None = None,
                            flip_facing: bool | None = None) -> dict[str, Any]:
-        """Edit a window's dimensions, material, frame, panes and facing in place.
+        """Edit a window's material, frame, pane grid and inside/outside orientation.
 
-        Dimensions are in metres. Pane counts range from 1 to 12 per direction.
-        Set flip_facing to true to face the interior, or false to face the exterior.
-        Use clear_material to remove the assigned material.
+        Frame dimensions are in metres. Use 1 to 12 panes per direction.
+        Set flip_facing to true for inside or false for outside.
         """
-        args = {'element_id': element_id}
-        args.update({k: v for k, v in {'offset': offset, 'width': width, 'height': height,
-                                       'sill': sill, 'material_id': material_id,
-                                       'frame_width': frame_width, 'frame_depth': frame_depth,
-                                       'panes_across': panes_across, 'panes_up': panes_up,
-                                       'flip_facing': flip_facing}.items() if v is not None})
-        if clear_material:
-            args['clear_material'] = True
-        return live_call('update_window', args, document_id, expected_revision)
+        args = {'element_id': element_id, 'material_id': material_id,
+                'clear_material': clear_material or None, 'frame_width': frame_width, 'frame_depth': frame_depth,
+                'panes_across': panes_across, 'panes_up': panes_up, 'flip_facing': flip_facing}
+        return live_call('update_window', {k: v for k, v in args.items() if v is not None},
+                         document_id, expected_revision)
 
 
 if __name__ == '__main__':

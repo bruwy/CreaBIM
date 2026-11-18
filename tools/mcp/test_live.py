@@ -68,10 +68,14 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(requests[-1]['command'], 'create_door')
                         self.assertEqual(requests[-1]['args'], {'wall_id': 'host', 'center': 2.0})
                         edit = await client.call_tool('live_update_door', {
-                            'document_id': 'doc', 'expected_revision': 7, 'element_id': 'door', 'width': 1.1})
+                            'document_id': 'doc', 'expected_revision': 7, 'element_id': 'door', 'width': 1.1,
+                            'material_id': 'material', 'frame_width': 0.08, 'frame_depth': 0.15,
+                            'flip_hand': False, 'flip_facing': True})
                         self.assertFalse(edit.isError, edit)
                         self.assertEqual(requests[-1]['command'], 'update_door')
-                        self.assertEqual(requests[-1]['args'], {'element_id': 'door', 'width': 1.1})
+                        self.assertEqual(requests[-1]['args'], {
+                            'element_id': 'door', 'width': 1.1, 'material_id': 'material',
+                            'frame_width': 0.08, 'frame_depth': 0.15, 'flip_hand': False, 'flip_facing': True})
         finally:
             server.close()
             await server.wait_closed()

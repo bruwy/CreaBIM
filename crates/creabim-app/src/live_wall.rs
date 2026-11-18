@@ -36,6 +36,54 @@ struct OpeningEdit {
     offset: Option<f64>,
     width: Option<f64>,
     height: Option<f64>,
+    material_id: Option<ElementId>,
+    #[serde(default)]
+    clear_material: bool,
+    frame_width: Option<f64>,
+    frame_depth: Option<f64>,
+    flip_hand: Option<bool>,
+    flip_facing: Option<bool>,
+}
+
+impl OpeningEdit {
+    fn apply_details(&self, model: &Model, opening: &mut Opening) -> Result<(), String> {
+        if let Some(id) = self.material_id {
+            if self.clear_material {
+                return Err("Choose either material_id or clear_material".into());
+            }
+            if !matches!(
+                model.get(id).map(|e| &e.kind),
+                Some(ElementKind::Material(_))
+            ) {
+                return Err("Choose an existing material".into());
+            }
+            opening.material = Some(id);
+        } else if self.clear_material {
+            opening.material = None;
+        }
+        if let Some(width) = self.frame_width {
+            if !(0.01..=0.5).contains(&width) {
+                return Err("Frame width must be between 0.01 and 0.5 m".into());
+            }
+            opening.frame.width = width;
+        }
+        if let Some(depth) = self.frame_depth {
+            if !(0.02..=1.0).contains(&depth) {
+                return Err("Frame depth must be between 0.02 and 1 m".into());
+            }
+            opening.frame.depth = depth;
+        }
+        if self.flip_hand.is_some_and(|hand| hand != opening.flip_hand) {
+            walls::flip_hand(opening);
+        }
+        if self
+            .flip_facing
+            .is_some_and(|facing| facing != opening.flip_facing)
+        {
+            walls::flip_facing(opening);
+        }
+        Ok(())
+    }
 }
 
 fn opening_host(model: &Model, id: ElementId) -> Result<&Wall, String> {
@@ -268,7 +316,10 @@ impl CreaBimApp {
         } else if edit.width.is_some() {
             walls::widen_in_place(model, opening.width, &mut updated);
         }
-        check_opening_fit(model, opening_host(model, updated.host)?, &updated)?;
+        if edit.offset.is_some() || edit.width.is_some() || edit.height.is_some() {
+            check_opening_fit(model, opening_host(model, updated.host)?, &updated)?;
+        }
+        edit.apply_details(model, &mut updated)?;
         self.doc
             .edit(edit.element_id, "Edit door", |e| {
                 e.kind = ElementKind::Opening(updated)
@@ -289,6 +340,13 @@ mod tests {
         let mut app = CreaBimApp::blank(None);
         app.load_model(creabim_core::sample::typed_house());
         let level = app.doc.model().levels().next().unwrap().0.id;
+        let door_type = app
+            .doc
+            .model()
+            .iter()
+            .find(|e| e.name == "Single door 900 × 2100")
+            .unwrap()
+            .id;
         let wall = Element::new(
             "Host",
             ElementKind::Wall(creabim_core::Wall::new(
@@ -305,12 +363,14 @@ mod tests {
             .unwrap();
         let original = app.doc.model().clone();
         let mut selection = Selection::default();
+        let mut state = PlanState::default();
+        state.types.insert(TypeCategory::Door, door_type);
         planview::plan_tool(
             &mut app.doc,
             level,
             Tool::Door,
             DVec2::new(42.0, 40.0),
-            &mut PlanState::default(),
+            &mut state,
             &mut selection,
         )
         .unwrap();
@@ -323,7 +383,8 @@ mod tests {
         assert!(app.doc.undo());
         let document = app.live_document_id.clone();
         let revision = app.doc.model().revision();
-        let create = |wall_id| json!({"wall_id": wall_id, "center": 2.0});
+        let create =
+            |wall_id| json!({"wall_id": wall_id, "center": 2.0, "opening_type_id": door_type});
         assert!(app
             .live_command(
                 "create_door",
@@ -339,8 +400,32 @@ mod tests {
         let id: ElementId = serde_json::from_value(result["id"].clone()).unwrap();
         let before = app.doc.model().get(id).unwrap().clone();
         assert_eq!(before.kind, native.kind);
+        assert_eq!(before.of_type, native.of_type);
         let revision = app.doc.model().revision();
-        let args = json!({"element_id": id, "width": 1.1});
+        let ElementKind::Opening(door) = &before.kind else {
+            panic!()
+        };
+        let material = app
+            .doc
+            .model()
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::Material(_)) && Some(e.id) != door.material)
+            .unwrap()
+            .id;
+        for invalid in [
+            json!({"element_id": id, "material_id": host}),
+            json!({"element_id": id, "material_id": material, "clear_material": true}),
+            json!({"element_id": id, "frame_width": 0.0}),
+            json!({"element_id": id, "frame_depth": 1.1}),
+        ] {
+            assert!(app
+                .live_command("update_door", invalid, Some(&document), Some(revision))
+                .is_err());
+            assert_eq!(app.doc.model().revision(), revision);
+            assert_eq!(app.doc.model().get(id), Some(&before));
+        }
+        let args = json!({"element_id": id, "width": 1.1, "material_id": material,
+                          "frame_width": 0.08, "frame_depth": 0.15, "flip_hand": true, "flip_facing": true});
         assert!(app
             .live_command(
                 "update_door",
@@ -349,16 +434,64 @@ mod tests {
                 Some(revision - 1)
             )
             .is_err());
-        app.live_command("update_door", args, Some(&document), Some(revision))
+        app.live_command("update_door", args.clone(), Some(&document), Some(revision))
             .unwrap();
-        let ElementKind::Opening(door) = &app.doc.model().get(id).unwrap().kind else {
+        let after = app.doc.model().get(id).unwrap().clone();
+        let ElementKind::Opening(door) = &after.kind else {
             panic!();
         };
         assert_eq!(door.host, host);
         assert_eq!(door.width, 1.1);
         assert!((door.offset + door.width / 2.0 - 2.0).abs() < 1e-9);
+        assert_eq!(door.material, Some(material));
+        assert_eq!((door.frame.width, door.frame.depth), (0.08, 0.15));
+        assert!(door.flip_hand && door.flip_facing);
+        let applied_type = after.of_type.as_ref().unwrap();
+        assert_eq!(applied_type.id, door_type);
+        assert!(applied_type
+            .overrides
+            .contains(&creabim_core::types::Param::Frame));
+        assert!(applied_type
+            .overrides
+            .contains(&creabim_core::types::Param::Material));
+        let revision = app.doc.model().revision();
+        app.live_command("update_door", args, Some(&document), Some(revision))
+            .unwrap();
+        assert_eq!(app.doc.model().revision(), revision);
+        app.live_command(
+            "update_door",
+            json!({"element_id": id, "clear_material": true}),
+            Some(&document),
+            Some(revision),
+        )
+        .unwrap();
+        let ElementKind::Opening(cleared) = &app.doc.model().get(id).unwrap().kind else {
+            panic!()
+        };
+        assert_eq!(cleared.material, None);
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.model().get(id), Some(&after));
         assert!(app.doc.undo());
         assert_eq!(app.doc.model().get(id), Some(&before));
+        app.doc
+            .edit(id, "Existing oversized door", |e| {
+                if let ElementKind::Opening(door) = &mut e.kind {
+                    door.height = 4.0;
+                }
+            })
+            .unwrap();
+        let revision = app.doc.model().revision();
+        let details = app
+            .live_command(
+                "update_door",
+                json!({"element_id": id, "frame_width": 0.08}),
+                Some(&document),
+                Some(revision),
+            )
+            .unwrap();
+        assert_eq!(details["element"]["kind"]["Opening"]["height"], 4.0);
+        assert!(app.doc.undo());
+        assert!(app.doc.undo());
         assert!(app.doc.undo());
         assert_eq!(&original, app.doc.model());
     }

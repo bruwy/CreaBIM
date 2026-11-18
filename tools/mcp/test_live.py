@@ -40,7 +40,8 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
                         names = {'inspect_project', 'list_elements', 'get_element',
                                  'get_schema', 'check_spec', 'build_project'}
-                        live_names = {'live_inspect', 'live_create_wall', 'live_create_door', 'live_update_door'}
+                        live_names = {'live_inspect', 'live_create_wall', 'live_create_door', 'live_update_door',
+                                      'live_create_window', 'live_update_window'}
                         self.assertEqual(set(tools), names | (live_names if enabled else set()))
                         if not enabled:
                             continue
@@ -76,6 +77,23 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(requests[-1]['args'], {
                             'element_id': 'door', 'width': 1.1, 'material_id': 'material',
                             'frame_width': 0.08, 'frame_depth': 0.15, 'flip_hand': False, 'flip_facing': True})
+                        window = await client.call_tool('live_create_window', {
+                            'document_id': 'doc', 'expected_revision': 8, 'wall_id': 'host', 'center': 2.0,
+                            'opening_type_id': 'type'})
+                        self.assertFalse(window.isError, window)
+                        self.assertEqual(requests[-1]['command'], 'create_window')
+                        self.assertEqual(requests[-1]['args'], {'wall_id': 'host', 'center': 2.0,
+                                                               'opening_type_id': 'type'})
+                        edit = await client.call_tool('live_update_window', {
+                            'document_id': 'doc', 'expected_revision': 9, 'element_id': 'window',
+                            'sill': 0.9, 'material_id': 'aluminum', 'frame_width': 0.05,
+                            'frame_depth': 0.09, 'panes_across': 3, 'panes_up': 2, 'flip_facing': False})
+                        self.assertFalse(edit.isError, edit)
+                        self.assertEqual(requests[-1]['command'], 'update_window')
+                        self.assertEqual(requests[-1]['args'], {
+                            'element_id': 'window', 'sill': 0.9, 'material_id': 'aluminum',
+                            'frame_width': 0.05, 'frame_depth': 0.09, 'panes_across': 3,
+                            'panes_up': 2, 'flip_facing': False})
         finally:
             server.close()
             await server.wait_closed()

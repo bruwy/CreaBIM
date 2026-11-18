@@ -193,6 +193,43 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
             args['clear_material'] = True
         return live_call('update_door', args, document_id, expected_revision)
 
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_create_window(document_id: str, expected_revision: int, wall_id: str,
+                           center: float, opening_type_id: str | None = None, width: float | None = None,
+                           height: float | None = None, sill: float | None = None) -> dict[str, Any]:
+        """Place a window in a host wall. The centre is measured from the wall start in metres.
+
+        An opening type sets the dimensions and sill. Override them only for untyped windows.
+        """
+        args = {'wall_id': wall_id, 'center': center}
+        args.update({k: v for k, v in {'opening_type_id': opening_type_id, 'width': width,
+                                       'height': height, 'sill': sill}.items() if v is not None})
+        return live_call('create_window', args, document_id, expected_revision)
+
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_update_window(document_id: str, expected_revision: int, element_id: str,
+                           offset: float | None = None, width: float | None = None,
+                           height: float | None = None, sill: float | None = None,
+                           material_id: str | None = None, clear_material: bool = False,
+                           frame_width: float | None = None, frame_depth: float | None = None,
+                           panes_across: int | None = None, panes_up: int | None = None,
+                           flip_facing: bool | None = None) -> dict[str, Any]:
+        """Edit a window's dimensions, material, frame, panes and facing in place.
+
+        Dimensions are in metres. Pane counts range from 1 to 12 per direction.
+        Set flip_facing to true to face the interior, or false to face the exterior.
+        Use clear_material to remove the assigned material.
+        """
+        args = {'element_id': element_id}
+        args.update({k: v for k, v in {'offset': offset, 'width': width, 'height': height,
+                                       'sill': sill, 'material_id': material_id,
+                                       'frame_width': frame_width, 'frame_depth': frame_depth,
+                                       'panes_across': panes_across, 'panes_up': panes_up,
+                                       'flip_facing': flip_facing}.items() if v is not None})
+        if clear_material:
+            args['clear_material'] = True
+        return live_call('update_window', args, document_id, expected_revision)
+
 
 if __name__ == '__main__':
     mcp.run(transport='stdio')

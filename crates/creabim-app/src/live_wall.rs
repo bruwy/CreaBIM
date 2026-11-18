@@ -1,5 +1,5 @@
 use super::CreaBimApp;
-use crate::planview::{self, PlanState};
+use crate::planview::{self, PlanState, Tool};
 use creabim_core::{
     walls, ElementId, ElementKind, LocationLine, Model, Opening, OpeningKind, TypeCategory, Wall,
 };
@@ -27,6 +27,7 @@ struct OpeningRequest {
     opening_type_id: Option<ElementId>,
     width: Option<f64>,
     height: Option<f64>,
+    sill: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +37,9 @@ struct OpeningEdit {
     offset: Option<f64>,
     width: Option<f64>,
     height: Option<f64>,
+    sill: Option<f64>,
+    panes_across: Option<u32>,
+    panes_up: Option<u32>,
     material_id: Option<ElementId>,
     #[serde(default)]
     clear_material: bool,
@@ -72,6 +76,20 @@ impl OpeningEdit {
                 return Err("Frame depth must be between 0.02 and 1 m".into());
             }
             opening.frame.depth = depth;
+        }
+        if self.flip_hand.is_some() && opening.kind != OpeningKind::Door {
+            return Err("Only doors have a hinge side".into());
+        }
+        for (count, panes) in [
+            (self.panes_across, &mut opening.frame.panes_across),
+            (self.panes_up, &mut opening.frame.panes_up),
+        ] {
+            if let Some(count) = count {
+                if opening.kind != OpeningKind::Window || !(1..=12).contains(&count) {
+                    return Err("Choose 1 to 12 panes per direction on a window".into());
+                }
+                *panes = count;
+            }
         }
         if self.flip_hand.is_some_and(|hand| hand != opening.flip_hand) {
             walls::flip_hand(opening);
@@ -173,7 +191,10 @@ impl CreaBimApp {
                 "project_path": self.path, "levels": levels, "wall_types": wall_types}),
             );
         }
-        if !matches!(command, "create_wall" | "create_door" | "update_door") {
+        if !matches!(
+            command,
+            "create_wall" | "create_door" | "update_door" | "create_window" | "update_window"
+        ) {
             return Err("Unknown live MCP command".into());
         }
         if document_id != Some(self.live_document_id.as_str()) {
@@ -205,8 +226,12 @@ impl CreaBimApp {
         }
 
         let id = match command {
-            "create_door" => self.create_live_door(args)?,
-            "update_door" => self.update_live_door(args)?,
+            "create_door" => self.create_live_opening(args, Tool::Door)?,
+            "update_door" => self.update_live_opening(args, OpeningKind::Door, "Edit door")?,
+            "create_window" => self.create_live_opening(args, Tool::Window)?,
+            "update_window" => {
+                self.update_live_opening(args, OpeningKind::Window, "Edit window")?
+            }
             _ => self.create_live_wall(args)?,
         };
         let model = self.doc.model();
@@ -259,7 +284,7 @@ impl CreaBimApp {
             .map_err(|e| e.to_string())
     }
 
-    fn create_live_door(&mut self, args: Value) -> Result<ElementId, String> {
+    fn create_live_opening(&mut self, args: Value, tool: Tool) -> Result<ElementId, String> {
         let request: OpeningRequest = serde_json::from_value(args).map_err(|e| e.to_string())?;
         let model = self.doc.model();
         let wall = opening_host(model, request.wall_id)?;
@@ -267,61 +292,71 @@ impl CreaBimApp {
             return Err("The opening centre must be along its wall".into());
         }
         let mut state = PlanState::default();
+        let (category, dimensions) = match tool {
+            Tool::Door => (TypeCategory::Door, &mut state.members.door),
+            Tool::Window => (TypeCategory::Window, &mut state.members.window),
+            _ => return Err("Choose the Door or Window tool".into()),
+        };
         if let Some(id) = request.opening_type_id {
-            if request.width.is_some() || request.height.is_some() {
-                return Err("A typed door uses its type's width and height".into());
+            if request.width.is_some() || request.height.is_some() || request.sill.is_some() {
+                return Err("A typed opening uses its type's dimensions".into());
             }
-            if !matches!(model.get(id).map(|e| &e.kind), Some(ElementKind::ElementType(t)) if t.category() == TypeCategory::Door)
+            if !matches!(model.get(id).map(|e| &e.kind), Some(ElementKind::ElementType(t)) if t.category() == category)
             {
-                return Err("Choose a door type".into());
+                return Err(format!("Choose a {} type", category.label()));
             }
-            state.types.insert(TypeCategory::Door, id);
+            state.types.insert(category, id);
         } else {
-            let [width, height, sill] = state.members.door;
-            state.members.door = [
+            let [width, height, sill] = *dimensions;
+            *dimensions = [
                 request.width.unwrap_or(width),
                 request.height.unwrap_or(height),
-                sill,
+                request.sill.unwrap_or(sill),
             ];
         }
-        let element = planview::opening_on_wall(
-            model,
-            request.wall_id,
-            request.center,
-            planview::Tool::Door,
-            &state,
-        )
-        .ok_or("The opening must fit within its wall")?;
+        let element =
+            planview::opening_on_wall(model, request.wall_id, request.center, tool, &state)
+                .ok_or("The opening must fit within its wall")?;
         if let ElementKind::Opening(opening) = &element.kind {
             check_opening_fit(model, wall, opening)?;
         }
         planview::insert_plan_opening(&mut self.doc, element).map_err(|e| e.to_string())
     }
 
-    fn update_live_door(&mut self, args: Value) -> Result<ElementId, String> {
+    fn update_live_opening(
+        &mut self,
+        args: Value,
+        kind: OpeningKind,
+        label: &str,
+    ) -> Result<ElementId, String> {
         let edit: OpeningEdit = serde_json::from_value(args).map_err(|e| e.to_string())?;
         let model = self.doc.model();
         let Some(ElementKind::Opening(opening)) = model.get(edit.element_id).map(|e| &e.kind)
         else {
-            return Err("Choose a door in the open document".into());
+            return Err("Choose an opening in the open document".into());
         };
-        if opening.kind != OpeningKind::Door {
-            return Err("Choose a door in the open document".into());
+        if opening.kind != kind {
+            return Err("The selected opening does not match the command".into());
         }
         let mut updated = opening.clone();
         updated.width = edit.width.unwrap_or(opening.width);
         updated.height = edit.height.unwrap_or(opening.height);
+        updated.sill = edit.sill.unwrap_or(opening.sill);
         if let Some(offset) = edit.offset {
             updated.offset = offset;
         } else if edit.width.is_some() {
             walls::widen_in_place(model, opening.width, &mut updated);
         }
-        if edit.offset.is_some() || edit.width.is_some() || edit.height.is_some() {
+        if edit.offset.is_some()
+            || edit.width.is_some()
+            || edit.height.is_some()
+            || edit.sill.is_some()
+        {
             check_opening_fit(model, opening_host(model, updated.host)?, &updated)?;
         }
         edit.apply_details(model, &mut updated)?;
         self.doc
-            .edit(edit.element_id, "Edit door", |e| {
+            .edit(edit.element_id, label, |e| {
                 e.kind = ElementKind::Opening(updated)
             })
             .map_err(|e| e.to_string())?;
@@ -332,21 +367,13 @@ impl CreaBimApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{planview::Tool, selection::Selection};
+    use crate::selection::Selection;
     use creabim_core::Element;
 
-    #[test]
-    fn live_door_matches_native_placement_and_supports_undoable_resize() {
+    fn app_with_opening_host() -> (CreaBimApp, ElementId, ElementId) {
         let mut app = CreaBimApp::blank(None);
         app.load_model(creabim_core::sample::typed_house());
         let level = app.doc.model().levels().next().unwrap().0.id;
-        let door_type = app
-            .doc
-            .model()
-            .iter()
-            .find(|e| e.name == "Single door 900 × 2100")
-            .unwrap()
-            .id;
         let wall = Element::new(
             "Host",
             ElementKind::Wall(creabim_core::Wall::new(
@@ -361,6 +388,19 @@ mod tests {
         app.doc
             .commit(creabim_core::Transaction::new("Host").insert(wall))
             .unwrap();
+        (app, level, host)
+    }
+
+    #[test]
+    fn live_door_matches_native_placement_and_supports_undoable_resize() {
+        let (mut app, level, host) = app_with_opening_host();
+        let door_type = app
+            .doc
+            .model()
+            .iter()
+            .find(|e| e.name == "Single door 900 × 2100")
+            .unwrap()
+            .id;
         let original = app.doc.model().clone();
         let mut selection = Selection::default();
         let mut state = PlanState::default();
@@ -494,6 +534,97 @@ mod tests {
         assert!(app.doc.undo());
         assert!(app.doc.undo());
         assert_eq!(&original, app.doc.model());
+    }
+
+    #[test]
+    fn live_window_matches_native_type_and_keeps_host_when_editing_sill() {
+        let (mut app, level, host) = app_with_opening_host();
+        let window_type = app.doc.model().iter().find(|e| {
+            matches!(&e.kind, ElementKind::ElementType(t) if t.category() == TypeCategory::Window)
+        }).unwrap().id;
+        let mut state = PlanState::default();
+        state.types.insert(TypeCategory::Window, window_type);
+        let mut selection = Selection::default();
+        planview::plan_tool(
+            &mut app.doc,
+            level,
+            Tool::Window,
+            DVec2::new(42.0, 40.0),
+            &mut state,
+            &mut selection,
+        )
+        .unwrap();
+        let native = app
+            .doc
+            .model()
+            .get(selection.active.unwrap())
+            .unwrap()
+            .clone();
+        assert!(app.doc.undo());
+        let document = app.live_document_id.clone();
+        let revision = app.doc.model().revision();
+        let created = app
+            .live_command(
+                "create_window",
+                json!({
+                    "wall_id": host, "center": 2.0, "opening_type_id": window_type,
+                }),
+                Some(&document),
+                Some(revision),
+            )
+            .unwrap();
+        let id: ElementId = serde_json::from_value(created["id"].clone()).unwrap();
+        let before = app.doc.model().get(id).unwrap().clone();
+        assert_eq!(before.kind, native.kind);
+        assert_eq!(before.of_type, native.of_type);
+        let material = app
+            .doc
+            .model()
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::Material(_)))
+            .unwrap()
+            .id;
+        let revision = app.doc.model().revision();
+        for invalid in [
+            json!({"sill": 3.1}),
+            json!({"panes_across": 13}),
+            json!({"panes_up": 0}),
+        ] {
+            let mut args = invalid;
+            args["element_id"] = json!(id);
+            assert!(app
+                .live_command("update_window", args, Some(&document), Some(revision))
+                .is_err());
+        }
+        assert_eq!(app.doc.model().revision(), revision);
+        assert_eq!(app.doc.model().get(id), Some(&before));
+        app.live_command(
+            "update_window",
+            json!({"element_id": id, "sill": 0.6, "offset": 0.3,
+                "material_id": material, "frame_width": 0.05, "frame_depth": 0.09,
+                "panes_across": 3, "panes_up": 2, "flip_facing": true}),
+            Some(&document),
+            Some(revision),
+        )
+        .unwrap();
+        let updated = app.doc.model().get(id).unwrap();
+        let ElementKind::Opening(window) = &updated.kind else {
+            panic!();
+        };
+        assert_eq!((window.host, window.sill, window.offset), (host, 0.6, 0.3));
+        assert_eq!(window.material, Some(material));
+        assert_eq!((window.frame.width, window.frame.depth), (0.05, 0.09));
+        assert_eq!((window.frame.panes_across, window.frame.panes_up), (3, 2));
+        let wall = opening_host(app.doc.model(), host).unwrap();
+        let glass_panes = creabim_geom::opening::opening_boxes(window, wall)
+            .into_iter()
+            .filter(|part| part.part == creabim_geom::opening::Part::Glass)
+            .count();
+        assert_eq!(glass_panes, 6);
+        assert!(window.flip_facing);
+        assert_eq!(updated.of_type.as_ref().unwrap().id, window_type);
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.model().get(id), Some(&before));
     }
 
     #[test]

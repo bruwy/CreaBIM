@@ -1,6 +1,7 @@
 use super::CreaBimApp;
+use crate::outline;
 use crate::planview::{self, PlanState};
-use creabim_core::{ElementId, ElementKind, LocationLine, TypeCategory};
+use creabim_core::{polygon, ElementId, ElementKind, LocationLine, TypeCategory};
 use eframe::egui;
 use glam::DVec2;
 use serde::Deserialize;
@@ -15,6 +16,21 @@ struct WallRequest {
     wall_type_id: Option<ElementId>,
     thickness: Option<f64>,
     location: Option<LocationLine>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateSlabRequest {
+    level_id: ElementId,
+    boundary: Vec<[f64; 2]>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateSlabRequest {
+    element_id: ElementId,
+    thickness: Option<f64>,
+    top_offset: Option<f64>,
 }
 
 impl CreaBimApp {
@@ -33,7 +49,7 @@ impl CreaBimApp {
                 || !self.shell.keys.is_empty()
                 || self.shell.web.as_ref().is_some_and(|web| web.has_pending())
         };
-        let result = if request.command == "create_wall" && interacting() {
+        let result = if request.command != "inspect_document" && interacting() {
             Err("Finish the current interaction in CreaBIM before editing".into())
         } else {
             self.live_command(
@@ -80,7 +96,7 @@ impl CreaBimApp {
                 "project_path": self.path, "levels": levels, "wall_types": wall_types}),
             );
         }
-        if command != "create_wall" {
+        if !matches!(command, "create_wall" | "create_slab" | "update_slab") {
             return Err("Unknown live MCP command".into());
         }
         if document_id != Some(self.live_document_id.as_str()) {
@@ -111,7 +127,24 @@ impl CreaBimApp {
             return Err("Finish the current operation in CreaBIM before editing".into());
         }
 
-        let wall: WallRequest = serde_json::from_value(args).map_err(|e| e.to_string())?;
+        let id = match command {
+            "create_slab" => {
+                self.live_create_slab(serde_json::from_value(args).map_err(|e| e.to_string())?)?
+            }
+            "update_slab" => {
+                self.live_update_slab(serde_json::from_value(args).map_err(|e| e.to_string())?)?
+            }
+            _ => self.live_create_wall(serde_json::from_value(args).map_err(|e| e.to_string())?)?,
+        };
+        let model = self.doc.model();
+        Ok(
+            json!({"id": id, "element": model.get(id), "document_id": self.live_document_id,
+            "revision": model.revision()}),
+        )
+    }
+
+    fn live_create_wall(&mut self, wall: WallRequest) -> Result<ElementId, String> {
+        let model = self.doc.model();
         if model.level(wall.level_id).is_none() {
             return Err("Choose a level from live_inspect".into());
         }
@@ -148,13 +181,71 @@ impl CreaBimApp {
                 return Err("An untyped wall has no layer boundaries".into());
             }
         }
-        let id = planview::create_straight_wall(&mut self.doc, wall.level_id, &state, start, end)
+        planview::create_straight_wall(&mut self.doc, wall.level_id, &state, start, end)
+            .map_err(|e| e.to_string())
+    }
+
+    fn live_create_slab(&mut self, request: CreateSlabRequest) -> Result<ElementId, String> {
+        if self.doc.model().level(request.level_id).is_none() {
+            return Err("Choose a level from live_inspect".into());
+        }
+        if !(3..=1000).contains(&request.boundary.len()) {
+            return Err("A slab outline needs 3 through 1000 corners".into());
+        }
+        let points: Vec<_> = request
+            .boundary
+            .into_iter()
+            .map(DVec2::from_array)
+            .collect();
+        if points.iter().enumerate().any(|(i, p)| {
+            !p.is_finite()
+                || p.abs().max_element() > 1e9
+                || points[..i].iter().any(|q| p.distance_squared(*q) < 1e-12)
+        }) || polygon::signed_area2(&points).abs() < 1e-8
+            || polygon::self_intersects(&points, true)
+        {
+            return Err(
+                "Give a simple slab polygon with distinct finite corners within ±1e9 m".into(),
+            );
+        }
+        let mut outline = outline::Outline::new_slab(self.doc.model(), request.level_id, points[0]);
+        outline.points = points;
+        let (message, id) = outline
+            .finish(&mut self.doc, true)
             .map_err(|e| e.to_string())?;
-        let model = self.doc.model();
-        Ok(
-            json!({"id": id, "element": model.get(id), "document_id": self.live_document_id,
-            "revision": model.revision()}),
-        )
+        id.ok_or(message)
+    }
+
+    fn live_update_slab(&mut self, request: UpdateSlabRequest) -> Result<ElementId, String> {
+        let id = request.element_id;
+        let Some(ElementKind::Slab(slab)) = self.doc.model().get(id).map(|e| &e.kind) else {
+            return Err("Choose an existing slab".into());
+        };
+        if request.thickness.is_none() && request.top_offset.is_none() {
+            return Err("Specify a slab thickness or top offset".into());
+        }
+        let mut edited = slab.clone();
+        if let Some(thickness) = request.thickness {
+            if slab.assembly.is_some() {
+                return Err("A layered slab's thickness is set by its assembly".into());
+            }
+            if !(0.02..=3.0).contains(&thickness) {
+                return Err("Slab thickness must be between 0.02 and 3 m".into());
+            }
+            edited.set_thickness(thickness, false);
+        }
+        if let Some(offset) = request.top_offset {
+            if !(-100.0..=100.0).contains(&offset) {
+                return Err("Slab top offset must be within ±100 m".into());
+            }
+            edited.top_offset = offset;
+        }
+        self.doc
+            .edit(id, "Edit slab", |element| {
+                element.kind = ElementKind::Slab(edited)
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(id)
     }
 }
 
@@ -163,6 +254,80 @@ mod tests {
     use super::*;
     use crate::{planview::Tool, selection::Selection};
     use creabim_core::Element;
+
+    #[test]
+    fn live_slab_matches_native_creation_and_edits_in_place() {
+        let mut app = CreaBimApp::blank(None);
+        app.load_model(creabim_core::sample::typed_house());
+        let snapshot = app
+            .live_command("inspect_document", json!({}), None, None)
+            .unwrap();
+        let level: ElementId = serde_json::from_value(snapshot["levels"][0]["id"].clone()).unwrap();
+        let document = snapshot["document_id"].as_str().unwrap();
+        let boundary = [[40.0, 40.0], [40.0, 44.0], [44.0, 44.0], [44.0, 40.0]];
+        let mut outline = crate::outline::Outline::new_slab(
+            app.doc.model(),
+            level,
+            DVec2::from_array(boundary[0]),
+        );
+        outline.points = boundary.map(DVec2::from_array).into();
+        let (_, native_id) = outline.finish(&mut app.doc, true).unwrap();
+        let native = app.doc.model().get(native_id.unwrap()).unwrap().clone();
+        assert!(app.doc.undo());
+
+        let revision = app.doc.model().revision();
+        assert!(app
+            .live_command(
+                "create_slab",
+                json!({"level_id": level, "boundary": [[0, 0], [3, 3], [3, 0], [0, 2]]}),
+                Some(document),
+                Some(revision),
+            )
+            .is_err());
+        assert_eq!(app.doc.model().revision(), revision);
+        let created = app
+            .live_command(
+                "create_slab",
+                json!({"level_id": level, "boundary": boundary}),
+                Some(document),
+                Some(revision),
+            )
+            .unwrap();
+        let id: ElementId = serde_json::from_value(created["id"].clone()).unwrap();
+        let before = app.doc.model().get(id).unwrap().clone();
+        assert_eq!(before.kind, native.kind);
+        assert_eq!(app.doc.undo_label(), Some("Draw slab"));
+
+        let update = json!({"element_id": id, "thickness": 0.31, "top_offset": 0.08});
+        assert!(app
+            .live_command(
+                "update_slab",
+                update.clone(),
+                Some(document),
+                Some(revision)
+            )
+            .unwrap_err()
+            .contains("revision changed"));
+        let edit_revision = app.doc.model().revision();
+        let invalid = json!({"element_id": id, "thickness": 0});
+        assert!(app
+            .live_command("update_slab", invalid, Some(document), Some(edit_revision))
+            .is_err());
+        assert_eq!(app.doc.model().get(id), Some(&before));
+        let after = app
+            .live_command("update_slab", update, Some(document), Some(edit_revision))
+            .unwrap();
+        assert_eq!(after["id"], created["id"]);
+        let ElementKind::Slab(slab) = &app.doc.model().get(id).unwrap().kind else {
+            panic!("expected a slab")
+        };
+        assert_eq!((slab.thickness, slab.top_offset), (0.31, 0.08));
+        assert_eq!(slab.area(), 16.0);
+        assert!(app.doc.undo());
+        assert_eq!(app.doc.model().get(id), Some(&before));
+        assert!(app.doc.undo());
+        assert!(app.doc.model().get(id).is_none());
+    }
 
     #[test]
     fn live_wall_matches_native_wall_and_undo() {

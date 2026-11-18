@@ -40,7 +40,8 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
                         names = {'inspect_project', 'list_elements', 'get_element',
                                  'get_schema', 'check_spec', 'build_project'}
-                        self.assertEqual(set(tools), names | ({'live_inspect', 'live_create_wall'} if enabled else set()))
+                        live_names = {'live_inspect', 'live_create_wall', 'live_create_slab', 'live_update_slab'}
+                        self.assertEqual(set(tools), names | (live_names if enabled else set()))
                         if not enabled:
                             continue
                         schema = tools['live_create_wall'].inputSchema
@@ -61,6 +62,19 @@ class LiveProtocolTest(unittest.IsolatedAsyncioTestCase):
                             'start': [0, 0], 'end': [3, 0], 'wall_type_id': 'type', 'thickness': 0.2})
                         self.assertTrue(conflict.isError, conflict)
                         self.assertEqual(len(requests), 2)
+                        self.assertEqual(tools['live_inspect'].inputSchema['properties'], {})
+                        self.assertNotIn('boundary', tools['live_update_slab'].inputSchema['properties'])
+                        self.assertNotIn('thickness', tools['live_create_slab'].inputSchema['properties'])
+                        document = {'document_id': 'doc', 'expected_revision': 7}
+                        for tool, command, args in (
+                            ('live_create_slab', 'create_slab', {
+                                'level_id': 'level', 'boundary': [[0, 0], [3, 0], [0, 3]]}),
+                            ('live_update_slab', 'update_slab', {'element_id': 'slab', 'top_offset': 0.12}),
+                        ):
+                            result = await client.call_tool(tool, {**document, **args})
+                            self.assertFalse(result.isError, result)
+                            self.assertEqual(requests[-1], {'token': TOKEN, 'command': command,
+                                                            'args': args, **document})
         finally:
             server.close()
             await server.wait_closed()

@@ -158,6 +158,23 @@ if os.environ.get('CREABIM_MCP_PORT') and os.environ.get('CREABIM_MCP_TOKEN'):
                                        'location': location}.items() if v is not None})
         return live_call('create_wall', args, document_id, expected_revision)
 
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_create_slab(document_id: str, expected_revision: int, level_id: str,
+                         boundary: list[list[float]]) -> dict[str, Any]:
+        """Draw a straight-edged slab with the native default thickness. Corners are in metres."""
+        args = {'level_id': level_id, 'boundary': boundary}
+        return live_call('create_slab', args, document_id, expected_revision)
+
+    @mcp.tool(annotations=CREATE, structured_output=True)
+    def live_update_slab(document_id: str, expected_revision: int, element_id: str,
+                         thickness: float | None = None,
+                         top_offset: float | None = None) -> dict[str, Any]:
+        """Update a slab in place. The top stays put unless top_offset is supplied. Units are metres."""
+        args = {'element_id': element_id}
+        args.update({k: v for k, v in {'thickness': thickness,
+                                       'top_offset': top_offset}.items() if v is not None})
+        return live_call('update_slab', args, document_id, expected_revision)
+
 
 if __name__ == '__main__':
     mcp.run(transport='stdio')

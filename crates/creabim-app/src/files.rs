@@ -361,6 +361,37 @@ pub fn pick_save(current: &str, title: &str, ext: &str) -> Option<String> {
     d.save_file().map(|p| p.display().to_string())
 }
 
+/// A window-owned sheet on macOS, so AppKit doesn't enter a nested event loop.
+#[cfg(target_os = "macos")]
+pub fn project_save_dialog(
+    current: &str,
+    parent: &eframe::Frame,
+) -> impl std::future::Future<Output = Option<rfd::FileHandle>> + use<> {
+    let path = std::path::absolute(current).unwrap_or_else(|_| current.into());
+    let mut dialog = rfd::AsyncFileDialog::new()
+        .set_parent(parent)
+        .set_title("Save the project as")
+        .add_filter("CREABIM", &["creabim"]);
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        dialog = dialog.set_file_name(name);
+    }
+    if let Some(dir) = path.parent().filter(|dir| dir.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn project_save_dialog(
+    current: &str,
+    _parent: &eframe::Frame,
+) -> impl std::future::Future<Output = Option<rfd::FileHandle>> + use<> {
+    std::future::ready(
+        pick_save(current, "Save the project as", "creabim")
+            .map(|path| std::path::PathBuf::from(path).into()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

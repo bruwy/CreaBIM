@@ -26,6 +26,30 @@ pub(crate) enum CloseState {
     Failed(String),
 }
 
+type SaveAsFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>>>>;
+
+pub(super) struct SaveAsDialog {
+    after: SaveAsAfter,
+    picker: Option<SaveAsFuture>,
+}
+
+enum SaveAsAfter {
+    Save,
+    ClassicClose,
+    WebClose {
+        since: std::time::Instant,
+        retry: Option<String>,
+    },
+}
+
+struct RepaintOnDialogResult(egui::Context);
+
+impl std::task::Wake for RepaintOnDialogResult {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.0.request_repaint();
+    }
+}
+
 /// How long Save spins at least, so it is seen, and how long "Saved."
 /// holds before CreaBIM closes (the page fades out in its last 0.3 s).
 const SAVING_AT_LEAST: std::time::Duration = std::time::Duration::from_millis(450);
@@ -81,6 +105,70 @@ pub(crate) fn save_error(e: &str) -> String {
 }
 
 impl CreaBimApp {
+    pub(super) fn save_as(&mut self) {
+        self.request_save_as(SaveAsAfter::Save);
+    }
+
+    fn request_save_as(&mut self, after: SaveAsAfter) {
+        self.save_as_dialog.get_or_insert(SaveAsDialog {
+            after,
+            picker: None,
+        });
+    }
+
+    /// Poll the file picker without blocking winit's event dispatch.
+    pub(super) fn save_as_step(
+        &mut self,
+        ctx: &egui::Context,
+        open_picker: impl FnOnce(&str) -> SaveAsFuture,
+    ) {
+        let Some(mut dialog) = self.save_as_dialog.take() else {
+            return;
+        };
+        let picker = dialog
+            .picker
+            .get_or_insert_with(|| open_picker(&with_extension(&self.path, "creabim")));
+        let waker = std::task::Waker::from(std::sync::Arc::new(RepaintOnDialogResult(ctx.clone())));
+        let picked = match picker
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+        {
+            std::task::Poll::Pending => {
+                self.save_as_dialog = Some(dialog);
+                return;
+            }
+            std::task::Poll::Ready(picked) => picked,
+        };
+        let result = picked.map(|file| {
+            let was = std::mem::replace(&mut self.path, file.path().display().to_string());
+            let result = self.save_file();
+            if result.is_err() {
+                self.path = was;
+            }
+            result
+        });
+        match dialog.after {
+            SaveAsAfter::Save => {
+                if let Some(result) = result {
+                    self.report(result, format!("Saved {}", self.path));
+                }
+            }
+            SaveAsAfter::ClassicClose => {
+                if let Some(result) = result {
+                    let saved = result.is_ok();
+                    self.report(result, format!("Saved {}", self.path));
+                    if saved {
+                        self.close_now(ctx);
+                        return;
+                    }
+                }
+                self.close_ask = false;
+            }
+            SaveAsAfter::WebClose { since, retry } => self.close_saved(since, retry, result),
+        }
+        ctx.request_repaint();
+    }
+
     /// The project has no file yet: Save asks where.
     fn never_saved(&self) -> bool {
         !std::path::Path::new(&self.path).exists()
@@ -171,6 +259,9 @@ impl CreaBimApp {
 
     /// Saving, then saved, then closed: one step a frame.
     fn close_step(&mut self, ctx: &egui::Context) {
+        if self.save_as_dialog.is_some() {
+            return;
+        }
         let soon = std::time::Duration::from_millis(40);
         match self.close_state.clone() {
             CloseState::Saving {
@@ -184,43 +275,12 @@ impl CreaBimApp {
                     ctx.request_repaint_after(soon);
                     return;
                 }
-                let r = if self.never_saved() || retry.is_some() {
-                    let start = with_extension(&self.path, "creabim");
-                    match crate::files::pick_save(&start, "Save the project as", "creabim") {
-                        Some(path) => {
-                            let was = std::mem::replace(&mut self.path, path);
-                            let r = self.save_file();
-                            if r.is_err() {
-                                self.path = was;
-                            }
-                            Some(r)
-                        }
-                        // Save as cancelled: back to the question
-                        None => None,
-                    }
-                } else {
-                    Some(self.save_file())
-                };
-                crate::actlog::line(match &r {
-                    None => "close: Save as cancelled".to_string(),
-                    Some(Ok(())) => format!("close: saved {}", self.path),
-                    Some(Err(e)) => format!("close: couldn't save {}: {e}", self.path),
-                });
-                self.close_state = match r {
-                    None => retry.map_or(CloseState::Ask, CloseState::Failed),
-                    Some(Err(e)) => {
-                        self.status = format!("Couldn't save {}: {e}", self.path);
-                        CloseState::Failed(save_error(&e))
-                    }
-                    Some(Ok(())) => {
-                        self.status = format!("Saved {}", self.path);
-                        CloseState::Saving {
-                            since,
-                            done: Some(Ok(())),
-                            retry: None,
-                        }
-                    }
-                };
+                if self.never_saved() || retry.is_some() {
+                    self.request_save_as(SaveAsAfter::WebClose { since, retry });
+                    return;
+                }
+                let result = self.save_file();
+                self.close_saved(since, retry, Some(result));
                 ctx.request_repaint();
             }
             CloseState::Saving { since, .. } => {
@@ -238,6 +298,34 @@ impl CreaBimApp {
             }
             _ => {}
         }
+    }
+
+    fn close_saved(
+        &mut self,
+        since: std::time::Instant,
+        retry: Option<String>,
+        result: Option<Result<(), String>>,
+    ) {
+        crate::actlog::line(match &result {
+            None => "close: Save as cancelled".to_string(),
+            Some(Ok(())) => format!("close: saved {}", self.path),
+            Some(Err(e)) => format!("close: couldn't save {}: {e}", self.path),
+        });
+        self.close_state = match result {
+            None => retry.map_or(CloseState::Ask, CloseState::Failed),
+            Some(Err(e)) => {
+                self.status = format!("Couldn't save {}: {e}", self.path);
+                CloseState::Failed(save_error(&e))
+            }
+            Some(Ok(())) => {
+                self.status = format!("Saved {}", self.path);
+                CloseState::Saving {
+                    since,
+                    done: Some(Ok(())),
+                    retry: None,
+                }
+            }
+        };
     }
 
     /// Closing with unsaved changes: Save, Don't save or Cancel. The web
@@ -306,7 +394,8 @@ impl CreaBimApp {
             if std::path::Path::new(&self.path).exists() {
                 self.save();
             } else {
-                self.save_as();
+                self.request_save_as(SaveAsAfter::ClassicClose);
+                return;
             }
             if self.unsaved() {
                 // the save was cancelled or failed: the project stays open
@@ -1206,6 +1295,65 @@ mod close_tests {
         app.path = dir.join("Terrace house.creabim").display().to_string();
         app.save_file().unwrap();
         (app, dir)
+    }
+
+    #[test]
+    fn save_as_waits_for_a_path_and_keeps_the_original_file() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = saved_app("save-as");
+        let original = std::fs::read(&app.path).unwrap();
+        let chosen = dir.join("copy.creabim");
+        edit(&mut app, "A");
+        app.save_as();
+        assert!(app.unsaved() && !chosen.exists());
+
+        app.save_as_step(&ctx, |start| {
+            assert!(start.ends_with("Terrace house.creabim"));
+            let path = chosen.clone();
+            let mut first = true;
+            Box::pin(std::future::poll_fn(move |_| {
+                if std::mem::take(&mut first) {
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(Some(path.clone().into()))
+                }
+            }))
+        });
+        assert!(app.unsaved() && !chosen.exists());
+        app.save_as_step(&ctx, |_| panic!("the active picker must be reused"));
+
+        assert_eq!(app.path, chosen.display().to_string());
+        assert!(chosen.is_file() && !app.unsaved());
+        assert_eq!(
+            std::fs::read(dir.join("Terrace house.creabim")).unwrap(),
+            original
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancelled_close_save_as_restores_the_save_prompt() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = saved_app("cancel-save-as");
+        let path = dir.join("unsaved.creabim").display().to_string();
+        app.path = path.clone();
+        edit(&mut app, "A");
+        app.close_ask = true;
+        app.close_do(&ctx, "save");
+        std::thread::sleep(Duration::from_millis(60));
+        app.close_step(&ctx);
+        assert!(matches!(
+            app.close_state,
+            CloseState::Saving { done: None, .. }
+        ));
+
+        app.save_as_step(&ctx, |_| Box::pin(std::future::ready(None)));
+
+        assert_eq!(app.close_state, CloseState::Ask);
+        assert_eq!(app.path, path);
+        assert!(app.close_ask && !app.close_ok && app.unsaved());
+        assert!(!std::path::Path::new(&path).exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

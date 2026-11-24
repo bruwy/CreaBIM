@@ -155,6 +155,7 @@ pub struct CreaBimApp {
     close_state: appmenu::CloseState,
     /// The close was settled (saved, or the changes let go): let it through.
     close_ok: bool,
+    save_as_dialog: Option<appmenu::SaveAsDialog>,
     /// The pointer left the drawing area (onto a web pane, or out of the
     /// window) and hasn't come back yet.
     pointer_away: bool,
@@ -415,6 +416,7 @@ impl CreaBimApp {
             close_ask: false,
             close_state: Default::default(),
             close_ok: false,
+            save_as_dialog: None,
             pointer_away: true,
             pointer_seen: 0.0,
             prop_front: None,
@@ -505,6 +507,11 @@ impl CreaBimApp {
     }
 
     fn load_model(&mut self, model: Model) {
+        if self.save_as_dialog.take().is_some() && self.close_ask {
+            self.close_ask = false;
+            self.close_state = Default::default();
+            self.hide_close_dialog();
+        }
         self.doc = Document::from_model(with_plan_views(model));
         self.selection.clear();
         self.hidden.clear();
@@ -664,14 +671,6 @@ impl CreaBimApp {
     fn open_dialog(&mut self) {
         if let Some(path) = crate::files::pick_open() {
             self.open_path(&path);
-        }
-    }
-
-    fn save_as(&mut self) {
-        let start = with_extension(&self.path, "creabim");
-        if let Some(path) = crate::files::pick_save(&start, "Save the project as", "creabim") {
-            self.path = path;
-            self.save();
         }
     }
 
@@ -11048,10 +11047,15 @@ impl eframe::App for CreaBimApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let _perf = Perf::new("frame");
         // never lose work to a close: unsaved changes ask first
-        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.close_ok && self.unsaved() {
+        if ui.ctx().input(|i| i.viewport().close_requested())
+            && !self.close_ok
+            && (self.unsaved() || self.save_as_dialog.is_some())
+        {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.close_ask = true;
+            if self.save_as_dialog.is_none() {
+                self.close_ask = true;
+            }
         }
         let ctx = ui.ctx().clone();
         // on the drawing area a bar's tooltip goes: the bar never hears the
@@ -11473,6 +11477,9 @@ impl eframe::App for CreaBimApp {
         self.help_window(&ctx);
         self.report_window(&ctx);
         self.close_window(&ctx);
+        self.save_as_step(&ctx, |start| {
+            Box::pin(crate::files::project_save_dialog(start, frame))
+        });
         // a plan in its own window keeps egui's menus
         self.plan.web_menus = false;
 

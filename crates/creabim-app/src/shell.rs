@@ -3155,6 +3155,7 @@ impl CreaBimApp {
         json!({
             "theme": self.theme(),
             "popup": self.popup_key(),
+            "native_menu": self.uses_native_menu(),
             "menus": (["File", "Edit", "View", "Create", "Materials", "Help"].map(|m| json!({"name": m, "key": format!("menu:{m}")}))),
             "quick": quick,
             // the selection count is in the status bar, where it belongs
@@ -3849,6 +3850,13 @@ impl CreaBimApp {
                 }
             }
             "down" if msg.pane != Pane::Popup => self.close_popup(),
+            #[cfg(target_os = "macos")]
+            "window-drag" if msg.pane == Pane::Top => {
+                if !self.mac_menu_blocked() {
+                    self.close_popup();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+            }
             "focus" => {
                 if let Some(web) = &mut self.shell.web {
                     web.focus_views();
@@ -4446,6 +4454,27 @@ impl CreaBimApp {
 
     /// The classic egui menu bar, drawn from the same items as the web one.
     pub(super) fn classic_menu(&mut self, ui: &mut egui::Ui) {
+        #[cfg(target_os = "macos")]
+        if self.uses_native_menu() {
+            let can_drag = !self.mac_menu_blocked();
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 36.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.add_space(94.0);
+                    ui.label("File:");
+                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(220.0));
+                    let handle = ui.allocate_response(ui.available_size(), egui::Sense::drag());
+                    if can_drag
+                        && handle.is_pointer_button_down_on()
+                        && ui.input(|i| i.pointer.primary_pressed())
+                    {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                },
+            );
+            return;
+        }
         let mut picked = None;
         egui::MenuBar::new().ui(ui, |ui| {
             for m in ["File", "Edit", "View", "Materials", "Help"] {

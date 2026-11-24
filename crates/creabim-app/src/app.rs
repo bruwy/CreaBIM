@@ -51,6 +51,9 @@ mod joinsui;
 mod levelcopy;
 #[path = "levelsui.rs"]
 mod levelsui;
+#[cfg(target_os = "macos")]
+#[path = "mac_menu.rs"]
+mod mac_menu;
 #[path = "marksui.rs"]
 mod marksui;
 #[path = "mastersui.rs"]
@@ -267,6 +270,8 @@ pub struct CreaBimApp {
     recent: crate::files::Recent,
     /// The web interface round the views.
     shell: shell::Shell,
+    #[cfg(target_os = "macos")]
+    mac_menu: Option<mac_menu::MacMenu>,
     /// The material browser.
     mat: materials::MaterialsUi,
     /// The assembly editor.
@@ -388,7 +393,20 @@ impl CreaBimApp {
         if let Some(path) = launch_file(std::env::args().skip(1)) {
             app.open_path(&path);
         }
+        #[cfg(target_os = "macos")]
+        app.refresh_mac_menu(&cc.egui_ctx);
         app
+    }
+
+    fn uses_native_menu(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.mac_menu.is_some()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     }
 
     /// The app round an empty document, with default settings and no
@@ -470,6 +488,8 @@ impl CreaBimApp {
             clipboard: vec![],
             recent: crate::files::Recent::load(),
             shell: Default::default(),
+            #[cfg(target_os = "macos")]
+            mac_menu: None,
             mat: Default::default(),
             asm: Default::default(),
             types: Default::default(),
@@ -1670,6 +1690,11 @@ impl CreaBimApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // AppKit can pass disabled menu shortcuts on to the focused view.
+        #[cfg(target_os = "macos")]
+        if self.uses_native_menu() && self.mac_menu_blocked() {
+            return;
+        }
         // a length typed into a grip's drag takes the keys
         if ctx.egui_wants_keyboard_input() || self.plan.grips.typing {
             return;
@@ -11075,6 +11100,8 @@ impl eframe::App for CreaBimApp {
                 _ => {}
             }
         }
+        #[cfg(target_os = "macos")]
+        self.dispatch_mac_menu(&ctx);
         crate::trace::hold(ctx.input(|i| i.pointer.any_down()));
         let m = ctx.input(|i| i.modifiers);
         shell::MODS.store(
@@ -11498,6 +11525,8 @@ impl eframe::App for CreaBimApp {
                 self.placement = PlanPlacement::Docked;
             }
         }
+        #[cfg(target_os = "macos")]
+        self.refresh_mac_menu(&ctx);
     }
 }
 

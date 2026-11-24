@@ -64,6 +64,8 @@ pub struct WebUi {
     sent: [String; PANES],
     /// Where each pane is, in points.
     pub rects: [egui::Rect; PANES],
+    #[cfg(target_os = "macos")]
+    ctx: egui::Context,
     popup_shown: bool,
     #[cfg(target_os = "linux")]
     x11: Option<X11Focus>,
@@ -72,6 +74,33 @@ pub struct WebUi {
 const CSS: &str = include_str!("../ui/app.css");
 const JS: &str = include_str!("../ui/app.js");
 const ICONS: &str = include_str!("../ui/icons.js");
+
+#[cfg(target_os = "macos")]
+fn mac_bounds_match(current: Rect, requested: Rect, scale: f64) -> bool {
+    // Wry writes whole logical coordinates and sizes to the AppKit frame.
+    current.position.to_logical::<f64>(scale) == requested.position.to_logical::<i32>(scale).cast()
+        && current.size.to_logical::<f64>(scale) == requested.size.to_logical::<i32>(scale).cast()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn mac_bounds_match_wrys_rounding_without_ignoring_drift() {
+    use wry::dpi::{LogicalPosition, LogicalSize};
+    let requested = Rect {
+        position: PhysicalPosition::new(5, 7).into(),
+        size: PhysicalSize::new(201, 47).into(),
+    };
+    let actual = Rect {
+        position: LogicalPosition::new(3.0, 4.0).into(),
+        size: LogicalSize::new(101.0, 24.0).into(),
+    };
+    assert!(mac_bounds_match(actual, requested, 2.0));
+    let moved = Rect {
+        position: LogicalPosition::new(3.0, 4.5).into(),
+        ..actual
+    };
+    assert!(!mac_bounds_match(moved, requested, 2.0));
+}
 
 /// icons.js as name -> markup: one `"name": "markup",` per line.
 pub fn icon_markup() -> Vec<(String, String)> {
@@ -158,6 +187,8 @@ impl WebUi {
             inbox,
             sent: Default::default(),
             rects: [egui::Rect::NOTHING; PANES],
+            #[cfg(target_os = "macos")]
+            ctx: ctx.clone(),
             popup_shown: false,
             #[cfg(target_os = "linux")]
             x11: X11Focus::new(frame),
@@ -183,11 +214,7 @@ impl WebUi {
     /// Put a pane over `rect` (in points).
     pub fn place(&mut self, pane: Pane, rect: egui::Rect, ppp: f32) {
         let i = pane as usize;
-        if self.rects[i] == rect {
-            return;
-        }
-        self.rects[i] = rect;
-        let _ = self.view(pane).set_bounds(Rect {
+        let bounds = Rect {
             position: PhysicalPosition::new(
                 (rect.min.x * ppp).round() as i32,
                 (rect.min.y * ppp).round() as i32,
@@ -198,7 +225,26 @@ impl WebUi {
                 (rect.height() * ppp).round().max(1.0) as u32,
             )
             .into(),
-        });
+        };
+        if self.rects[i] == rect {
+            #[cfg(not(target_os = "macos"))]
+            return;
+            // AppKit can move a child during a window resize even when its
+            // egui rectangle is unchanged. Reconcile the actual position.
+            #[cfg(target_os = "macos")]
+            {
+                let scale = self.ctx.native_pixels_per_point().unwrap_or(ppp) as f64;
+                if self
+                    .view(pane)
+                    .bounds()
+                    .is_ok_and(|current| mac_bounds_match(current, bounds, scale))
+                {
+                    return;
+                }
+            }
+        }
+        self.rects[i] = rect;
+        let _ = self.view(pane).set_bounds(bounds);
     }
 
     /// Send a pane its state, if it changed since last time.

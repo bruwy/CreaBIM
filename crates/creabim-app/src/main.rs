@@ -80,11 +80,17 @@ fn main() -> eframe::Result {
     }));
     #[cfg(target_os = "linux")]
     linux_setup();
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("CreaBIM")
+        .with_inner_size([1400.0, 860.0])
+        .with_icon(app_icon());
+    #[cfg(target_os = "macos")]
+    let viewport = viewport
+        .with_fullsize_content_view(true)
+        .with_titlebar_shown(false)
+        .with_title_shown(false);
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("CreaBIM")
-            .with_inner_size([1400.0, 860.0])
-            .with_icon(app_icon()),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         #[cfg(target_os = "linux")]
         event_loop_builder: Some(Box::new(|b| {
